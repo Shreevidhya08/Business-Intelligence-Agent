@@ -54,9 +54,7 @@ behind these choices and their trade-offs.
    will differ from the ones already in `config.py` unless you're using
    the exact same import. To find yours:
    - Run `test_connection.py` (calls `get_board_info` on the Work Orders
-     board), or
-   - Use `get_deals_columns.py` (included) to dump any board's columns
-     as a ready-to-paste Python dict.
+     board)
 
    Update `WORK_ORDERS_COLUMNS` and `DEALS_COLUMNS` in `config.py`
    accordingly, and update the join column references in `agent.py`'s
