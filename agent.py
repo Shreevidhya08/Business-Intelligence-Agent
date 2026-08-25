@@ -71,6 +71,13 @@ can single-handedly exceed the token budget and fail the whole request.
 
 {chr(10).join(f"- {issue}" for issue in KNOWN_DATA_ISSUES)}
 
+## Leadership update requests
+When asked to "prepare a leadership update", "summarize for leadership", or similar,
+structure the answer as: (1) Pipeline health — deal counts/stages, closure probability
+by sector; (2) Operational status — work order execution/billing status; (3) Cross-board
+risks — clients with active deals but stalled work orders or vice versa; (4) Data caveats
+relevant to this summary. Keep it concise enough to paste into a deck or email.
+
 ## Style
 
 Interpret vague questions by figuring out relevant board/columns
