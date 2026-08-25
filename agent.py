@@ -71,13 +71,6 @@ can single-handedly exceed the token budget and fail the whole request.
 
 {chr(10).join(f"- {issue}" for issue in KNOWN_DATA_ISSUES)}
 
-## Leadership update requests
-When asked to "prepare a leadership update", "summarize for leadership", or similar,
-structure the answer as: (1) Pipeline health — deal counts/stages, closure probability
-by sector; (2) Operational status — work order execution/billing status; (3) Cross-board
-risks — clients with active deals but stalled work orders or vice versa; (4) Data caveats
-relevant to this summary. Keep it concise enough to paste into a deck or email.
-
 ## Style
 
 Interpret vague questions by figuring out relevant board/columns
@@ -87,10 +80,38 @@ data explicitly. Give context (comparisons across sectors/periods),
 not just raw numbers.
 """
 
+# Appended to SYSTEM_PROMPT only when the incoming question looks like a
+# leadership-update request (see LEADERSHIP_KEYWORDS / app.py's detection).
+# Kept out of the base SYSTEM_PROMPT and out of every other request's
+# token budget on purpose — with two boards' schemas and MCP tool
+# descriptions already eating into the 8,000 TPM ceiling, this can't be
+# a permanent tax on every call. Only pay for it on the turns that need it.
+LEADERSHIP_BLOCK = """
 
-async def build_agent():
+## Leadership update requests
+
+When asked to "prepare a leadership update", "summarize for leadership",
+or similar, structure the answer as: (1) Pipeline health — deal counts/
+stages, closure probability by sector; (2) Operational status — work
+order execution/billing status; (3) Cross-board risks — clients with
+active deals but stalled work orders or vice versa; (4) Data caveats
+relevant to this summary. Keep it concise enough to paste into a deck
+or email.
+"""
+
+
+async def build_agent(leadership_mode: bool = False):
+    """Build the ReAct agent.
+
+    leadership_mode: when True, appends LEADERSHIP_BLOCK to the system
+    prompt so the agent structures its answer for a leadership update.
+    Left False by default so routine questions don't pay the extra
+    token cost of instructions they don't need.
+    """
     client = get_mcp_client()
     tools = await get_readonly_tools(client)
+
+    prompt = SYSTEM_PROMPT + (LEADERSHIP_BLOCK if leadership_mode else "")
 
     # llama-3.3-70b-versatile (tried for its higher 12,000 TPM free-tier
     # limit) was decommissioned by Groq — no longer callable. Back to
@@ -105,5 +126,5 @@ async def build_agent():
         model="qwen/qwen3.6-27b", api_key=GROQ_API_KEY, temperature=0
     )
 
-    agent = create_react_agent(model, tools, prompt=SYSTEM_PROMPT)
+    agent = create_react_agent(model, tools, prompt=prompt)
     return agent
