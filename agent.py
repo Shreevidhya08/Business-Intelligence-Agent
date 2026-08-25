@@ -1,130 +1,75 @@
 """
-agent.py
+app.py
 
-Builds the LangGraph ReAct agent: binds the read-only monday.com MCP
-tools to an LLM, with a system prompt that tells it about both boards'
-schema, how to join them, and known data-quality issues to caveat.
+Streamlit chat UI for the Business Intelligence Agent.
+Run: streamlit run app.py
+
+Each question rebuilds the monday MCP client + agent inside a single
+asyncio.run() call, rather than caching an agent across reruns. The MCP
+client holds resources tied to whichever asyncio event loop created it,
+and Streamlit reruns this whole script on every interaction — caching
+the client risks reusing a connection whose loop has already been torn
+down. Reconnecting each turn costs a bit of latency but avoids that
+entire class of bug. Revisit this only if reconnect time becomes an
+actual problem once things are stable.
 """
 
-from langchain_groq import ChatGroq
-from langgraph.prebuilt import create_react_agent
+import asyncio
 
-from config import (
-    DEALS_BOARD_ID,
-    DEALS_COLUMNS,
-    GROQ_API_KEY,
-    KNOWN_DATA_ISSUES,
-    WORK_ORDERS_BOARD_ID,
-    WORK_ORDERS_COLUMNS,
+import streamlit as st
+from langchain_core.messages import HumanMessage, AIMessage
+
+from agent import build_agent
+
+# Keep in sync with MAX_HISTORY_MESSAGES in main.py — same reasoning:
+# unbounded history eventually exceeds Groq's free-tier TPM limit even
+# with a tight system prompt and minimal tools.
+MAX_HISTORY_MESSAGES = 12
+
+st.set_page_config(page_title="Business Intelligence Agent", page_icon="📊")
+st.title("📊 Business Intelligence Agent")
+st.caption(
+    "Ask about Work Orders and Deals. Strictly read-only — never modifies your boards."
 )
-from mcp_tools import get_mcp_client, get_readonly_tools
 
-SYSTEM_PROMPT = f"""You are a read-only BI assistant for Skylark Drones, answering
-founder-level questions from two monday.com boards. NEVER create, update,
-or delete anything.
+if "messages" not in st.session_state:
+    st.session_state.messages = []  # list of LangChain message objects
 
-## Boards & columns
-
-Work Orders (board {WORK_ORDERS_BOARD_ID}) — project execution:
-{WORK_ORDERS_COLUMNS}
-
-Deals (board {DEALS_BOARD_ID}) — sales pipeline:
-{DEALS_COLUMNS}
-
-## Joining the boards
-
-Item names on both boards are masked placeholders (e.g. cartoon
-characters) — never unique, never use for joins/identification.
-- Work Orders row identifier: Serial # (`{WORK_ORDERS_COLUMNS['serial_number']}`).
-- Cross-board join: Work Orders Customer Name Code
-  (`{WORK_ORDERS_COLUMNS['customer_code']}`) <-> Deals Client Code
-  (`{DEALS_COLUMNS['client_code']}`). Customer-level, many-to-many —
-  one client can have several deals and work orders. Aggregate per
-  client code; never pair individual rows 1:1.
-
-## Fetching data
-
-- `get_board_info`: column IDs/types/labels when unsure.
-- `execute_code` (Python + GraphQL against api.monday.com/v2): ALL item
-  reads. Use `items_page(limit: N)` with `column_values {{ id text value }}`,
-  paginate via `cursor`. Filter/aggregate/join in the Python code, not
-  GraphQL. Queries only, never mutations.
-- `get_board_items_page` is not available — always use `execute_code`.
-
-## CRITICAL: keep execute_code output small
-
-Whatever your Python code prints becomes input to your NEXT reasoning
-step — printing raw item lists (especially from BOTH boards for a join)
-can single-handedly exceed the token budget and fail the whole request.
-- NEVER print raw items, full column_values dumps, or unaggregated
-  lists — do that for one board with a few hundred rows and the request
-  fails before you even see an answer.
-- Aggregate, filter, and join fully inside the Python code first (counts,
-  sums, group-bys, top-N). Print ONLY that final small result.
-- If you need to eyeball raw data, print at most 5-10 sample rows, never
-  a full board dump.
-- For a cross-board join specifically: fetch both boards, build the join
-  in Python, and print only the joined/aggregated output — never both
-  raw source lists in the same print.
-
-## Known data-quality issues (surface as caveats when relevant)
-
-{chr(10).join(f"- {issue}" for issue in KNOWN_DATA_ISSUES)}
-
-## Style
-
-Interpret vague questions by figuring out relevant board/columns
-yourself, rather than expecting exact names. Ask for clarification on
-genuine ambiguity (date ranges, sector names). Flag missing/null/odd
-data explicitly. Give context (comparisons across sectors/periods),
-not just raw numbers.
-"""
-
-# Appended to SYSTEM_PROMPT only when the incoming question looks like a
-# leadership-update request (see LEADERSHIP_KEYWORDS / app.py's detection).
-# Kept out of the base SYSTEM_PROMPT and out of every other request's
-# token budget on purpose — with two boards' schemas and MCP tool
-# descriptions already eating into the 8,000 TPM ceiling, this can't be
-# a permanent tax on every call. Only pay for it on the turns that need it.
-LEADERSHIP_BLOCK = """
-
-## Leadership update requests
-
-When asked to "prepare a leadership update", "summarize for leadership",
-or similar, structure the answer as: (1) Pipeline health — deal counts/
-stages, closure probability by sector; (2) Operational status — work
-order execution/billing status; (3) Cross-board risks — clients with
-active deals but stalled work orders or vice versa; (4) Data caveats
-relevant to this summary. Keep it concise enough to paste into a deck
-or email.
-"""
+# Render prior turns on every rerun (Streamlit doesn't persist the DOM itself)
+for msg in st.session_state.messages:
+    if isinstance(msg, HumanMessage):
+        with st.chat_message("user"):
+            st.markdown(msg.content)
+    elif isinstance(msg, AIMessage) and msg.content:
+        # Skip AIMessages that only carry tool calls with no content —
+        # those are intermediate ReAct steps, not something to show.
+        with st.chat_message("assistant"):
+            st.markdown(msg.content)
 
 
-async def build_agent(leadership_mode: bool = False):
-    """Build the ReAct agent.
+async def run_agent(conversation):
+    agent = await build_agent()
+    result = await agent.ainvoke({"messages": conversation})
+    return result["messages"]
 
-    leadership_mode: when True, appends LEADERSHIP_BLOCK to the system
-    prompt so the agent structures its answer for a leadership update.
-    Left False by default so routine questions don't pay the extra
-    token cost of instructions they don't need.
-    """
-    client = get_mcp_client()
-    tools = await get_readonly_tools(client)
 
-    prompt = SYSTEM_PROMPT + (LEADERSHIP_BLOCK if leadership_mode else "")
+user_input = st.chat_input("Ask a business question...")
 
-    # llama-3.3-70b-versatile (tried for its higher 12,000 TPM free-tier
-    # limit) was decommissioned by Groq — no longer callable. Back to
-    # qwen3.6-27b, which is still 8,000 TPM on the free tier. gpt-oss-120b
-    # is the only other current option and has a known quirk: it sometimes
-    # emits Python-style True/False strings instead of JSON booleans in
-    # tool call arguments, which breaks strict schema validation — so
-    # qwen3.6-27b stays the pick. Staying under 8,000 TPM now depends on
-    # keeping ALLOWED_TOOL_NAMES minimal (see mcp_tools.py) and keeping
-    # SYSTEM_PROMPT tight, since there's no headroom to spare on this tier.
-    model = ChatGroq(
-        model="qwen/qwen3.6-27b", api_key=GROQ_API_KEY, temperature=0
-    )
+if user_input:
+    st.session_state.messages.append(HumanMessage(content=user_input))
+    with st.chat_message("user"):
+        st.markdown(user_input)
 
-    agent = create_react_agent(model, tools, prompt=prompt)
-    return agent
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            try:
+                updated_messages = asyncio.run(run_agent(st.session_state.messages))
+            except Exception as e:
+                st.error(f"Something went wrong: {e}")
+                st.stop()
+
+        reply = updated_messages[-1]
+        st.markdown(reply.content)
+
+    # Cap history the same way main.py does, to stay under the TPM budget
+    st.session_state.messages = updated_messages[-MAX_HISTORY_MESSAGES:]
