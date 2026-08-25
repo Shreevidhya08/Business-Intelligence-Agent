@@ -12,6 +12,11 @@ the client risks reusing a connection whose loop has already been torn
 down. Reconnecting each turn costs a bit of latency but avoids that
 entire class of bug. Revisit this only if reconnect time becomes an
 actual problem once things are stable.
+
+Because the agent is already rebuilt fresh on every turn, detecting
+"leadership update" style questions and passing that into build_agent
+costs nothing extra structurally — it only changes which system prompt
+variant gets used for that one turn (see agent.py's LEADERSHIP_BLOCK).
 """
 
 import asyncio
@@ -25,6 +30,27 @@ from agent import build_agent
 # unbounded history eventually exceeds Groq's free-tier TPM limit even
 # with a tight system prompt and minimal tools.
 MAX_HISTORY_MESSAGES = 12
+
+# Simple keyword check to detect leadership-update style requests, so the
+# extra LEADERSHIP_BLOCK instructions (see agent.py) only get sent — and
+# only cost tokens — on turns that actually need them, not on every
+# routine question. Deliberately cheap/heuristic rather than an extra LLM
+# call, to avoid spending more of the tight token budget just to decide
+# whether to spend more of the tight token budget.
+LEADERSHIP_KEYWORDS = (
+    "leadership",
+    "exec summary",
+    "executive summary",
+    "board update",
+    "summarize for",
+    "summarise for",
+)
+
+
+def is_leadership_request(text: str) -> bool:
+    lowered = text.lower()
+    return any(keyword in lowered for keyword in LEADERSHIP_KEYWORDS)
+
 
 st.set_page_config(page_title="Business Intelligence Agent", page_icon="📊")
 st.title("📊 Business Intelligence Agent")
@@ -47,8 +73,8 @@ for msg in st.session_state.messages:
             st.markdown(msg.content)
 
 
-async def run_agent(conversation):
-    agent = await build_agent()
+async def run_agent(conversation, leadership_mode: bool):
+    agent = await build_agent(leadership_mode=leadership_mode)
     result = await agent.ainvoke({"messages": conversation})
     return result["messages"]
 
@@ -60,10 +86,14 @@ if user_input:
     with st.chat_message("user"):
         st.markdown(user_input)
 
+    leadership_mode = is_leadership_request(user_input)
+
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
             try:
-                updated_messages = asyncio.run(run_agent(st.session_state.messages))
+                updated_messages = asyncio.run(
+                    run_agent(st.session_state.messages, leadership_mode)
+                )
             except Exception as e:
                 st.error(f"Something went wrong: {e}")
                 st.stop()
