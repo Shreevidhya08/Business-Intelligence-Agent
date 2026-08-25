@@ -91,9 +91,6 @@ python main.py
 streamlit run app.py
 ```
 
-Type `leadership` in the CLI, or click **"📋 Leadership Update"** in the
-Streamlit UI, for a structured board-ready summary across both boards
-instead of a normal Q&A turn.
 
 ## Verifying the setup before trusting the agent's answers
 
