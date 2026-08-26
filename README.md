@@ -1,4 +1,4 @@
-# Skylark Drones — Business Intelligence Agent
+# Business Intelligence Agent
 
 A conversational agent that answers founder-level business questions by
 querying two monday.com boards (Work Orders and Deals) live — no cached
